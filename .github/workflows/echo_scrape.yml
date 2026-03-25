@@ -1,0 +1,57 @@
+name: Scrape EPA ECHO DMR Data
+
+on:
+  schedule:
+    # Every Monday at 6 AM UTC.
+    # EPA ECHO bulk files are updated periodically; weekly Monday runs
+    # reliably catch new quarterly and monthly DMR submissions.
+    - cron: '0 6 * * 1'
+  workflow_dispatch: # Manual trigger from GitHub UI for testing / backfill
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90  # ECHO bulk ZIP files can be 1-2 GB; allow extra time
+
+    permissions:
+      contents: write  # Required to commit updated CSV back to the repo
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Use GITHUB_TOKEN so the bot commit can trigger downstream workflows
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        # requests + pandas + numpy are all that echo_dmr_scraper.py needs.
+        # numpy is required by launch_ready_columns.py (imported by the scraper).
+        run: pip install requests pandas numpy
+
+      - name: Read state config
+        id: config
+        run: |
+          STATE_CODE=$(python -c "from state_config import STATE_CODE; print(STATE_CODE)")
+          DATA_FILE=$(python -c "from state_config import DATA_FILE; print(DATA_FILE)")
+          echo "state_code=$STATE_CODE" >> "$GITHUB_OUTPUT"
+          echo "data_file=$DATA_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Run ECHO DMR scraper
+        run: python echo_dmr_scraper.py
+
+      - name: Commit updated data
+        run: |
+          git config user.name  "DischargeWatch Bot"
+          git config user.email "actions@github.com"
+          git add "${{ steps.config.outputs.data_file }}"
+          if git diff --staged --quiet; then
+            echo "No new data scraped — CSV unchanged, skipping commit."
+          else
+            git commit -m "data: add EPA ECHO ${{ steps.config.outputs.state_code }} DMR exceedances $(date +%Y-%m-%d)"
+            git push
+          fi
